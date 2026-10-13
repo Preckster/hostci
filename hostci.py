@@ -136,9 +136,9 @@ def discover(repo: Repo) -> list[Build]:
 def complete_auto_merges(repo: Repo) -> None:
     """Merge PRs whose author enabled auto-merge once they are CLEAN.
 
-    GitHub doesn't reliably fire auto-merge for commit statuses posted with the same account's
-    token (observed: PR stayed CLEAN + auto-merge enabled without merging), so hostci finishes
-    the job. The merge still goes through GitHub's ruleset checks.
+    Safety net: GitHub's own auto-merge did fire for hostci statuses, but only minutes after
+    the PR turned CLEAN. Merging here makes it prompt. The merge still goes through GitHub's
+    ruleset checks, and --match-head-commit prevents merging a head that changed meanwhile.
     """
     out = sh(["gh", "pr", "list", "--repo", repo.name, "--state", "open", "--json",
               "number,autoMergeRequest,mergeStateStatus,headRefOid"]).stdout
