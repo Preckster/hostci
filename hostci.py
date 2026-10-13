@@ -133,6 +133,28 @@ def discover(repo: Repo) -> list[Build]:
     return builds
 
 
+def complete_auto_merges(repo: Repo) -> None:
+    """Merge PRs whose author enabled auto-merge once they are CLEAN.
+
+    GitHub doesn't reliably fire auto-merge for commit statuses posted with the same account's
+    token (observed: PR stayed CLEAN + auto-merge enabled without merging), so hostci finishes
+    the job. The merge still goes through GitHub's ruleset checks.
+    """
+    out = sh(["gh", "pr", "list", "--repo", repo.name, "--state", "open", "--json",
+              "number,autoMergeRequest,mergeStateStatus,headRefOid"]).stdout
+    for pr in json.loads(out or "[]"):
+        amr = pr.get("autoMergeRequest")
+        if not amr or pr["mergeStateStatus"] != "CLEAN":
+            continue
+        method = {"SQUASH": "--squash", "REBASE": "--rebase", "MERGE": "--merge"}[amr["mergeMethod"]]
+        try:
+            sh(["gh", "pr", "merge", str(pr["number"]), "--repo", repo.name, method,
+                "--match-head-commit", pr["headRefOid"]])
+            log(f"{repo.name}: auto-merged PR #{pr['number']}")
+        except subprocess.CalledProcessError as e:
+            log(f"{repo.name}: auto-merge of PR #{pr['number']} failed: {e.stderr.strip()}")
+
+
 # ---------------------------------------------------------------- execution
 
 def set_status(repo: Repo, sha: str, state: str, context: str, desc: str, url: str = "") -> None:
@@ -288,6 +310,11 @@ def main() -> int:
                 log(f"would build {repo.name} {b.label} {b.sha[:12]} {b.job}")
             else:
                 build(b)
+        if not args.dry_run:
+            try:
+                complete_auto_merges(repo)
+            except subprocess.CalledProcessError as e:
+                log(f"{repo.name}: auto-merge scan failed: {e.stderr.strip()}")
     return 0
 
 

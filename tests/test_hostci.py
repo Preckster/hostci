@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import sys
 import unittest
@@ -75,6 +76,38 @@ class DiscoveryTests(unittest.TestCase):
                                  "description": hostci.WAITING + ", owner must add label"}]
         builds = hostci.discover(self.repo)
         self.assertIn(("PR #3", "ci"), {(b.label, b.job) for b in builds})
+
+
+class AutoMergeTests(unittest.TestCase):
+    def test_merges_only_clean_prs_with_auto_merge(self):
+        prs = [
+            {"number": 1, "autoMergeRequest": {"mergeMethod": "SQUASH"}, "mergeStateStatus": "CLEAN",
+             "headRefOid": "aaa"},
+            {"number": 2, "autoMergeRequest": {"mergeMethod": "SQUASH"}, "mergeStateStatus": "BLOCKED",
+             "headRefOid": "bbb"},
+            {"number": 3, "autoMergeRequest": None, "mergeStateStatus": "CLEAN", "headRefOid": "ccc"},
+        ]
+        calls = []
+
+        class R:
+            def __init__(self, out):
+                self.stdout = out
+
+        def fake_sh(cmd, **kw):
+            calls.append(cmd)
+            return R(json.dumps(prs) if cmd[:3] == ["gh", "pr", "list"] else "")
+
+        orig = hostci.sh
+        hostci.sh = fake_sh
+        try:
+            hostci.complete_auto_merges(hostci.Repo(name="o/r"))
+        finally:
+            hostci.sh = orig
+        merges = [c for c in calls if c[:3] == ["gh", "pr", "merge"]]
+        self.assertEqual(len(merges), 1)
+        self.assertIn("1", merges[0])
+        self.assertIn("--squash", merges[0])
+        self.assertIn("aaa", merges[0])
 
 
 if __name__ == "__main__":
