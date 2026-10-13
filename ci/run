@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# hostci entrypoint for this repo: ./ci/run <job>
+set -euo pipefail
+job=${1:-ci}
+step() { printf '\n=== %s\n' "$*"; }
+case "$job" in
+  ci)
+    step "guard: no GitHub Actions workflows (Actions are banned)"
+    if [ -d .github/workflows ]; then echo "found .github/workflows"; exit 1; fi
+    step "python: compile + pyflakes"
+    python3 -m py_compile hostci.py
+    python3 -m pyflakes hostci.py tests/*.py
+    step "shellcheck"
+    shellcheck install.sh ci/run
+    step "unit tests"
+    python3 -m unittest discover -s tests -v
+    step "secrets: gitleaks"
+    gitleaks dir . --no-banner --redact
+    ;;
+  release)
+    "$0" ci
+    mkdir -p out/release
+    tar -czf "out/release/hostci-${HOSTCI_TAG:-dev}.tar.gz" hostci.py install.sh config.example.toml systemd README.md LICENSE
+    ;;
+  *) echo "unknown job: $job"; exit 2 ;;
+esac

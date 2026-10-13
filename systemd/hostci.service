@@ -1,0 +1,13 @@
+[Unit]
+Description=hostci: poll GitHub repos and run local CI/CD jobs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/hostci/hostci.py
+# Poller runs as root only to create sandboxed job units and read the gh token;
+# the jobs themselves run as user ci with no credentials (see hostci.py run_job).
+Environment=HOSTCI_CONFIG=/etc/hostci/config.toml
+TimeoutStartSec=3h
+Nice=5

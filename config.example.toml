@@ -1,0 +1,11 @@
+# /etc/hostci/config.toml
+[[repo]]
+name = "Preckster/dune-awakening-modding"
+jobs_timeout = 1800      # seconds per job
+memory_max = "6G"        # systemd MemoryMax for the job unit
+cpu_quota = "600%"       # 6 of 16 cores
+release_tag_glob = "v*"  # tags that trigger the release (CD) job
+trusted_label = "ci:run" # owner adds this label to run CI on PRs from non-collaborators
+
+[[repo]]
+name = "Preckster/hostci"
