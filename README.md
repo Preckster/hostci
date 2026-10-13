@@ -20,6 +20,12 @@ repos (it's disabled in each repo's settings and `ci/run` fails if `.github/work
   full logs stay in `/var/lib/hostci-state/logs/`.
 - Branch rulesets require the `hostci/ci` status, so PRs can't merge until the host has built them.
 
+## Repo policy (applies to every hostci-managed repo)
+- `main` ruleset: PR required, `hostci/ci` must pass on an up-to-date branch, squash-only,
+  linear history, signed commits, no force-push or deletion, no bypass for anyone.
+- `v*` tags can't be updated or deleted. Commits and tags are SSH-signed on the host
+  (`/root/.ssh/id_ed25519_git_signing`, registered on GitHub as a signing key).
+
 ## Credentials
 `/etc/hostci/token.env` (0600, root) holds `GH_TOKEN`. install.sh seeds it from `gh auth token`.
 For least privilege, replace it with a token that can only write commit statuses, contents
