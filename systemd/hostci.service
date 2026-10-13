@@ -9,5 +9,7 @@ ExecStart=/usr/bin/python3 /opt/hostci/hostci.py
 # Poller runs as root only to create sandboxed job units and read the gh token;
 # the jobs themselves run as user ci with no credentials (see hostci.py run_job).
 Environment=HOSTCI_CONFIG=/etc/hostci/config.toml
+# GH_TOKEN=... (mode 0600). Needs: repo statuses + contents + releases, and gist for log links.
+EnvironmentFile=/etc/hostci/token.env
 TimeoutStartSec=3h
 Nice=5
