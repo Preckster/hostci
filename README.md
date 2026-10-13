@@ -20,6 +20,11 @@ repos (it's disabled in each repo's settings and `ci/run` fails if `.github/work
   full logs stay in `/var/lib/hostci-state/logs/`.
 - Branch rulesets require the `hostci/ci` status, so PRs can't merge until the host has built them.
 
+## Credentials
+`/etc/hostci/token.env` (0600, root) holds `GH_TOKEN`. install.sh seeds it from `gh auth token`.
+For least privilege, replace it with a token that can only write commit statuses, contents
+and releases on the configured repos, plus gists for the log links.
+
 ## Operate
     sudo ./install.sh                         # install/update, enables the timer
     python3 /opt/hostci/hostci.py --dry-run   # what would build now
