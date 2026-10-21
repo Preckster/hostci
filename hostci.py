@@ -43,7 +43,7 @@ class Repo:
     release_tag_glob: str = "v*"
     trusted_label: str = "ci:run"              # owner adds this to run CI on untrusted PRs
     # globs that out/release must match (each at least once) before a release is published;
-    # {tag} = the tag, {version} = the tag without a leading "v". An empty out/release always
+    # {tag} = the tag, {version} = the tag without a leading "v" (test-v1.2 counts as v1.2). An empty out/release always
     # fails unless release_allow_empty is set.
     release_assets: list = field(default_factory=list)
     release_allow_empty: bool = False
@@ -253,6 +253,8 @@ class ReleaseError(Exception):
 
 
 def expected_assets(repo: Repo, tag: str) -> list[str]:
+    # throwaway dry-run tags test-v<ver> (never released by discovery) expect v<ver>'s assets
+    tag = tag.removeprefix("test-")
     version = tag[1:] if tag[:1] == "v" else tag
     return [g.replace("{tag}", tag).replace("{version}", version) for g in repo.release_assets]
 

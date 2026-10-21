@@ -43,8 +43,9 @@ and releases on the configured repos, plus gists for the log links.
     python3 /opt/hostci/hostci.py --rerun OWNER/REPO@SHA
     # release dry run: release job + asset check for a commit, no tag/status/release needed
     python3 /opt/hostci/hostci.py --release-check OWNER/REPO@SHA v1.2.3
-    # ... plus a draft upload to an existing throwaway tag (delete draft + tag afterwards)
-    python3 /opt/hostci/hostci.py --release-check OWNER/REPO@SHA test-x --draft
+    # ... plus a draft upload to an existing throwaway tag test-v1.2.3 (expects v1.2.3's assets;
+    # delete the draft and the tag afterwards)
+    python3 /opt/hostci/hostci.py --release-check OWNER/REPO@SHA test-v1.2.3 --draft
     journalctl -u hostci -f                   # live runner log
     ls /var/lib/hostci-state/logs/
 

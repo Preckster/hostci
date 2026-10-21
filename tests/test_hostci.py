@@ -138,6 +138,10 @@ class ReleaseAssetTests(unittest.TestCase):
         subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=self.out, check=True,
                        capture_output=True)
 
+    def test_test_tag_expects_the_versions_assets(self):
+        self.assertEqual(hostci.expected_assets(self.repo, "test-v1.2.0"),
+                         ["Mod-1.2.0.zip", "Server-v1.2.0-*.tar.gz"])
+
     def test_empty_release_dir_fails(self):
         with self.assertRaisesRegex(hostci.ReleaseError, "empty"):
             hostci.prepare_release(self.b, self.wd)
