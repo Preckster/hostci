@@ -5,6 +5,8 @@ Each run (systemd timer, every minute) polls the configured repos and builds:
   * the default branch head            -> job "ci"
   * open pull requests (trusted only)  -> job "ci"
   * tags matching release_tag_glob     -> job "release" (CD), then publishes a GitHub Release
+                                          with out/release/* + SHA256SUMS, only when every
+                                          asset in release_assets is there (see publish_release)
 
 Results are reported as commit statuses (context "hostci/<job>"), so branch rulesets can
 require them. Jobs run the repo's own `ci/run <job>` as the unprivileged `ci` user in a
@@ -40,6 +42,11 @@ class Repo:
     cpu_quota: str = "600%"
     release_tag_glob: str = "v*"
     trusted_label: str = "ci:run"              # owner adds this to run CI on untrusted PRs
+    # globs that out/release must match (each at least once) before a release is published;
+    # {tag} = the tag, {version} = the tag without a leading "v". An empty out/release always
+    # fails unless release_allow_empty is set.
+    release_assets: list = field(default_factory=list)
+    release_allow_empty: bool = False
     extra_env: dict = field(default_factory=dict)
 
 
@@ -241,18 +248,69 @@ def publish_log(b: Build, logf: Path) -> str:
         tmp.unlink(missing_ok=True)
 
 
-def publish_release(b: Build, wd: Path) -> None:
+class ReleaseError(Exception):
+    """The release job passed but its assets are incomplete: nothing (or only a draft) is published."""
+
+
+def expected_assets(repo: Repo, tag: str) -> list[str]:
+    version = tag[1:] if tag[:1] == "v" else tag
+    return [g.replace("{tag}", tag).replace("{version}", version) for g in repo.release_assets]
+
+
+def prepare_release(b: Build, wd: Path) -> list[Path]:
+    """Check out/release against the repo's expected assets and write a verified SHA256SUMS."""
     out = wd / "out" / "release"
-    assets = sorted(p for p in out.glob("*") if p.is_file()) if out.exists() else []
-    if assets:
-        sums = "".join(f"{sh(['sha256sum', p.name], cwd=out).stdout}" for p in assets)
-        (out / "SHA256SUMS").write_text(sums)
-        assets.append(out / "SHA256SUMS")
-    cmd = ["gh", "release", "create", b.tag, "--repo", b.repo.name, "--verify-tag",
+    files = sorted(p for p in out.glob("*") if p.is_file() and p.name != "SHA256SUMS") if out.is_dir() else []
+    if not files:
+        if b.repo.release_allow_empty:
+            return []
+        raise ReleaseError("out/release is empty: the release job built no assets")
+    names = [p.name for p in files]
+    missing = [g for g in expected_assets(b.repo, b.tag or "") if not any(fnmatch.fnmatch(n, g) for n in names)]
+    if missing:
+        raise ReleaseError(f"missing release assets {', '.join(missing)} (out/release has {', '.join(names)})")
+    empty = [p.name for p in files if p.stat().st_size == 0]
+    if empty:
+        raise ReleaseError(f"empty release assets: {', '.join(empty)}")
+    sums = out / "SHA256SUMS"
+    sums.write_text(sh(["sha256sum", "--", *names], cwd=out).stdout)
+    listed = sorted(line.split(None, 1)[1].lstrip("*") for line in sums.read_text().splitlines())
+    if listed != sorted(names):
+        raise ReleaseError("SHA256SUMS does not list exactly the release assets")
+    try:
+        sh(["sha256sum", "--strict", "--quiet", "-c", "SHA256SUMS"], cwd=out)
+    except subprocess.CalledProcessError as e:
+        raise ReleaseError(f"SHA256SUMS does not verify: {(e.stdout + e.stderr).strip()[:200]}") from e
+    return files + [sums]
+
+
+def find_release(repo: Repo, tag: str) -> dict | None:
+    """The release for a tag, drafts included (the tags endpoint does not return drafts)."""
+    return next((r for r in gh_api(f"repos/{repo.name}/releases?per_page=100") or []
+                 if r["tag_name"] == tag), None)
+
+
+def publish_release(b: Build, wd: Path, publish: bool = True) -> dict:
+    """Create the release as a draft, check that GitHub has every asset (name, size, uploaded),
+    then publish it. A failed check leaves the draft (delete it to retry) and raises."""
+    assets = prepare_release(b, wd)
+    cmd = ["gh", "release", "create", b.tag, "--repo", b.repo.name, "--verify-tag", "--draft",
            "--generate-notes", "--title", b.tag]
     if "-" in b.tag:
         cmd.append("--prerelease")
     sh(cmd + [str(p) for p in assets])
+    rel = find_release(b.repo, b.tag)
+    if rel is None:
+        raise ReleaseError(f"draft release {b.tag} not found after upload")
+    remote = {a["name"]: (a["size"], a["state"]) for a in rel.get("assets", [])}
+    local = {p.name: (p.stat().st_size, "uploaded") for p in assets}
+    if remote != local:
+        raise ReleaseError(f"uploaded assets differ (draft {b.tag} kept): "
+                           f"missing/different {sorted(set(local.items()) - set(remote.items()))}, "
+                           f"extra {sorted(set(remote) - set(local))}")
+    if publish:
+        sh(["gh", "api", "-X", "PATCH", f"repos/{b.repo.name}/releases/{rel['id']}", "-F", "draft=false"])
+    return rel
 
 
 def build(b: Build) -> None:
@@ -265,13 +323,19 @@ def build(b: Build) -> None:
     try:
         wd = checkout(b)
         rc = run_job(b, wd, logf)
+        blocked = ""
         if rc == 0 and b.job == "release":
-            publish_release(b, wd)
+            try:
+                publish_release(b, wd)
+            except ReleaseError as e:
+                blocked = str(e)
+                with logf.open("a") as fh:
+                    fh.write(f"\nhostci: release NOT published: {blocked}\n")
         url = publish_log(b, logf)
-        state = "success" if rc == 0 else "failure"
+        state = "success" if rc == 0 and not blocked else "failure"
         desc = "passed" if rc == 0 else f"failed (exit {rc})"
         if b.job == "release" and rc == 0:
-            desc = f"released {b.tag}"
+            desc = f"release blocked: {blocked}" if blocked else f"released {b.tag}"
         set_status(b.repo, b.sha, state, ctx, desc, url)
         log(f"{b.repo.name} {b.label} {b.sha[:12]} {b.job}: {state} {url}")
         shutil.rmtree(wd, ignore_errors=True)
@@ -282,10 +346,46 @@ def build(b: Build) -> None:
         set_status(b.repo, b.sha, "error", ctx, f"runner error: {str(e)[:100]}")
 
 
+def release_check(repos: list[Repo], target: str, tag: str, draft: bool = False) -> int:
+    name, sha = target.split("@")
+    repo = next(r for r in repos if r.name == name)
+    b = Build(repo, sha, sha, "release", f"release-check {tag}", tag=tag)
+    logdir = STATE / "logs" / repo.name.replace("/", "__")
+    logdir.mkdir(parents=True, exist_ok=True)
+    logf = logdir / f"{time.strftime('%Y%m%d-%H%M%S')}-{sha[:12]}-release-check.log"
+    wd = checkout(b)
+    try:
+        rc = run_job(b, wd, logf)
+        log(f"release job exit {rc}, log {logf}")
+        if rc != 0:
+            return rc
+        try:
+            if draft:
+                rel = publish_release(b, wd, publish=False)
+                log(f"draft {tag} verified: {rel['html_url']}")
+            else:
+                for p in prepare_release(b, wd):
+                    log(f"asset {p.name} {p.stat().st_size} bytes")
+                log("SHA256SUMS:\n" + (wd / "out" / "release" / "SHA256SUMS").read_text().rstrip())
+        except ReleaseError as e:
+            log(f"release would be BLOCKED: {e}")
+            return 1
+        log("release check passed")
+        return 0
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dry-run", action="store_true", help="only list what would be built")
     ap.add_argument("--rerun", metavar="OWNER/REPO@SHA", help="force a ci job for one commit")
+    ap.add_argument("--release-check", nargs=2, metavar=("OWNER/REPO@SHA", "TAG"),
+                    help="run the release job for a commit as if TAG pointed at it and check its "
+                         "assets; no status, no release, the tag need not exist")
+    ap.add_argument("--draft", action="store_true",
+                    help="with --release-check: also upload a draft release to the existing TAG "
+                         "and verify it (left as a draft; delete it and the tag afterwards)")
     args = ap.parse_args()
     lock = open("/run/hostci.lock", "w")
     try:
@@ -294,6 +394,8 @@ def main() -> int:
         log("another run is active; exiting")
         return 0
     repos = load_config()
+    if args.release_check:
+        return release_check(repos, *args.release_check, draft=args.draft)
     if args.rerun:
         name, sha = args.rerun.split("@")
         repo = next(r for r in repos if r.name == name)

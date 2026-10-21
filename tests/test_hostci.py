@@ -1,7 +1,9 @@
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location("hostci", pathlib.Path(__file__).parent.parent / "hostci.py")
@@ -108,6 +110,93 @@ class AutoMergeTests(unittest.TestCase):
         self.assertIn("1", merges[0])
         self.assertIn("--squash", merges[0])
         self.assertIn("aaa", merges[0])
+
+
+class ReleaseAssetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wd = pathlib.Path(self.tmp.name)
+        self.out = self.wd / "out" / "release"
+        self.repo = hostci.Repo(name="o/r", release_assets=["Mod-{version}.zip", "Server-{tag}-*.tar.gz"])
+        self.b = hostci.Build(self.repo, "abc", "refs/tags/v1.2.0", "release", "v1.2.0", tag="v1.2.0")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def put(self, *names, data=b"x"):
+        self.out.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (self.out / n).write_bytes(data)
+
+    def test_complete_assets_get_verified_sums(self):
+        self.put("Mod-1.2.0.zip", "Server-v1.2.0-linux.tar.gz", "SHA256SUMS")   # stale sums replaced
+        assets = hostci.prepare_release(self.b, self.wd)
+        self.assertEqual([p.name for p in assets],
+                         ["Mod-1.2.0.zip", "Server-v1.2.0-linux.tar.gz", "SHA256SUMS"])
+        sums = (self.out / "SHA256SUMS").read_text().splitlines()
+        self.assertEqual(len(sums), 2)
+        subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=self.out, check=True,
+                       capture_output=True)
+
+    def test_empty_release_dir_fails(self):
+        with self.assertRaisesRegex(hostci.ReleaseError, "empty"):
+            hostci.prepare_release(self.b, self.wd)
+        self.repo.release_allow_empty = True
+        self.assertEqual(hostci.prepare_release(self.b, self.wd), [])
+
+    def test_missing_expected_asset_fails(self):
+        self.put("Mod.dll")                       # the v0.4.1 voices case: a DLL, no zips
+        with self.assertRaisesRegex(hostci.ReleaseError, "Mod-1.2.0.zip"):
+            hostci.prepare_release(self.b, self.wd)
+
+    def test_wrong_version_fails(self):
+        self.put("Mod-1.1.0.zip", "Server-v1.2.0-linux.tar.gz")
+        with self.assertRaisesRegex(hostci.ReleaseError, "missing release assets Mod-1.2.0.zip"):
+            hostci.prepare_release(self.b, self.wd)
+
+    def test_zero_byte_asset_fails(self):
+        self.put("Mod-1.2.0.zip", "Server-v1.2.0-linux.tar.gz", data=b"")
+        with self.assertRaisesRegex(hostci.ReleaseError, "empty release assets"):
+            hostci.prepare_release(self.b, self.wd)
+
+    def _publish(self, remote_assets):
+        calls = []
+
+        class R:
+            stdout = ""
+
+        def fake_sh(cmd, **kw):
+            calls.append(cmd)
+            return orig_sh(cmd, **kw) if cmd[0] == "sha256sum" else R()
+
+        def fake_api(path, method="GET", fields=None):
+            return [{"tag_name": "v1.2.0", "id": 7, "html_url": "u", "assets": remote_assets(self.out)}]
+
+        orig_sh, orig_api = hostci.sh, hostci.gh_api
+        hostci.sh, hostci.gh_api = fake_sh, fake_api
+        try:
+            hostci.publish_release(self.b, self.wd)
+        finally:
+            hostci.sh, hostci.gh_api = orig_sh, orig_api
+        return calls
+
+    def test_publish_creates_draft_then_publishes_verified(self):
+        self.put("Mod-1.2.0.zip", "Server-v1.2.0-linux.tar.gz")
+
+        def remote(out):
+            return [{"name": p.name, "size": p.stat().st_size, "state": "uploaded"} for p in out.iterdir()]
+        calls = self._publish(remote)
+        create = next(c for c in calls if c[:3] == ["gh", "release", "create"])
+        self.assertIn("--draft", create)
+        self.assertTrue(any(c[:2] == ["gh", "api"] and "draft=false" in c for c in calls))
+
+    def test_publish_keeps_draft_when_upload_incomplete(self):
+        self.put("Mod-1.2.0.zip", "Server-v1.2.0-linux.tar.gz")
+
+        def remote(out):
+            return [{"name": "Mod-1.2.0.zip", "size": 1, "state": "uploaded"}]
+        with self.assertRaisesRegex(hostci.ReleaseError, "draft v1.2.0 kept"):
+            self._publish(remote)
 
 
 if __name__ == "__main__":
