@@ -12,7 +12,13 @@ repos (it's disabled in each repo's settings and `ci/run` fails if `.github/work
   - tags matching `v*`, job `release`, only once `hostci/ci` passed on that commit. It then
     creates the GitHub Release with `out/release/*` plus `SHA256SUMS`.
 - The repo defines its pipeline in `ci/run <job>` (exit 0 = pass). Release artifacts go to
-  `out/release/`.
+  `out/release/` (only there: files elsewhere, e.g. `out/package/`, are never published).
+- Release guard: nothing is published unless `out/release` is non-empty, every glob in the
+  repo's `release_assets` matches (`{tag}`, `{version}` = tag without `v`), no asset is empty and
+  the generated `SHA256SUMS` lists exactly the assets and verifies. The release is created as a
+  draft, the uploaded assets (name, size, state) are compared with the local ones, and only then
+  is it published. A blocked release sets `hostci/release` to failure ("release blocked: ...");
+  a failed upload check leaves the draft: delete the draft to let hostci retry the tag.
 - Jobs run as user `ci` in a transient systemd unit: no GitHub token, ProtectSystem=strict,
   ProtectHome, no access to /root or Proxmox config, MemoryMax/CPUQuota/RuntimeMaxSec limits.
   Only the root poller talks to GitHub (via `gh`).
@@ -35,6 +41,11 @@ and releases on the configured repos, plus gists for the log links.
     sudo ./install.sh                         # install/update, enables the timer
     python3 /opt/hostci/hostci.py --dry-run   # what would build now
     python3 /opt/hostci/hostci.py --rerun OWNER/REPO@SHA
+    # release dry run: release job + asset check for a commit, no tag/status/release needed
+    python3 /opt/hostci/hostci.py --release-check OWNER/REPO@SHA v1.2.3
+    # ... plus a draft upload to an existing throwaway tag test-v1.2.3 (expects v1.2.3's assets;
+    # delete the draft and the tag afterwards)
+    python3 /opt/hostci/hostci.py --release-check OWNER/REPO@SHA test-v1.2.3 --draft
     journalctl -u hostci -f                   # live runner log
     ls /var/lib/hostci-state/logs/
 
